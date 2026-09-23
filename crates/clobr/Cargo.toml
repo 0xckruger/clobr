@@ -1,0 +1,15 @@
+[package]
+name = "clobr"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "book"
+harness = false

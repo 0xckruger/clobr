@@ -210,11 +210,11 @@ impl OrderBook {
         Ok(())
     }
 
-    pub fn best_bid(&mut self) -> Option<Price> {
+    pub fn best_bid(&self) -> Option<Price> {
         self.bids.last_key_value().map(|(price, _)| *price)
     }
 
-    pub fn best_ask(&mut self) -> Option<Price> {
+    pub fn best_ask(&self) -> Option<Price> {
         self.asks.first_key_value().map(|(price, _)| *price)
     }
 }
@@ -334,6 +334,36 @@ mod tests {
         assert!(!book.orders.contains_key(&first));
         assert!(!book.orders.contains_key(&sell_id));
         assert!(book.asks.is_empty());
+    }
+
+    #[test]
+    fn buy_limit_sweeps_crossing_asks_and_rests_remainder() {
+        let mut book = OrderBook::new();
+        let lower = book
+            .add(NewOrder::new(Qty(5), Sell, Limit { price: Price(99) }))
+            .unwrap();
+        let equal = book
+            .add(NewOrder::new(Qty(4), Sell, Limit { price: Price(100) }))
+            .unwrap();
+        let higher = book
+            .add(NewOrder::new(Qty(1), Sell, Limit { price: Price(101) }))
+            .unwrap();
+
+        let buy_id = book
+            .add(NewOrder::new(Qty(10), Buy, Limit { price: Price(100) }))
+            .unwrap();
+
+        assert_eq!(book.asks.len(), 1);
+        assert_eq!(book.asks[&Price(101)][0].qty, Qty(1));
+        assert_eq!(
+            book.bids[&Price(100)][0],
+            RestingOrder::new(buy_id, Qty(1), Buy, Price(100))
+        );
+        assert_eq!(book.orders[&buy_id], (Buy, Price(100)));
+        assert!(book.orders.contains_key(&higher));
+        assert!(!book.orders.contains_key(&lower));
+        assert!(!book.orders.contains_key(&equal));
+        assert_eq!(book.orders.len(), 2);
     }
 
     #[test]

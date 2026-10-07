@@ -10,7 +10,7 @@ pub enum BookError {
     InvalidQty(String, Qty),
     AddOrderError(String),
     InvalidPrice(String, Price),
-    CancelError(String, OrderId)
+    CancelError(String, OrderId),
 }
 impl std::fmt::Display for BookError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -44,14 +44,18 @@ impl OrderBook {
     pub fn add(&mut self, new_order: NewOrder) -> Result<OrderId> {
         if new_order.qty.is_zero() {
             return Err(BookError::InvalidQty(
-                "Quantity must be positive. Received {}".into(), new_order.qty
+                "Quantity must be positive. Received {}".into(),
+                new_order.qty,
             ));
         }
 
         if let OrderType::Limit { price } = new_order.order_type
             && price.is_zero()
         {
-            return Err(BookError::InvalidPrice("Price must be positive. Received {}".into(), price));
+            return Err(BookError::InvalidPrice(
+                "Price must be positive. Received {}".into(),
+                price,
+            ));
         }
 
         let id = self.next_id;
@@ -186,10 +190,9 @@ impl OrderBook {
     }
 
     pub fn cancel(&mut self, order_id: OrderId) -> Result<()> {
-        let &(side, price) = self
-            .orders
-            .get(&order_id)
-            .ok_or_else(|| BookError::CancelError("Order ID does not exist. Order ID: ".into(), order_id))?;
+        let &(side, price) = self.orders.get(&order_id).ok_or_else(|| {
+            BookError::CancelError("Order ID does not exist. Order ID: ".into(), order_id)
+        })?;
 
         let book = match side {
             Side::Buy => &mut self.bids,

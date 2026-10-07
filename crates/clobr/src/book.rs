@@ -7,7 +7,10 @@ use std::num::NonZeroU64;
 type Result<T> = std::result::Result<T, BookError>;
 #[derive(Debug, Clone)]
 pub enum BookError {
-    ExecutionError(String),
+    InvalidQty(String, Qty),
+    AddOrderError(String),
+    InvalidPrice(String, Price),
+    CancelError(String, OrderId)
 }
 impl std::fmt::Display for BookError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -40,22 +43,22 @@ impl OrderBook {
 
     pub fn add(&mut self, new_order: NewOrder) -> Result<OrderId> {
         if new_order.qty.is_zero() {
-            return Err(BookError::ExecutionError(
-                "Quantity must be positive".into(),
+            return Err(BookError::InvalidQty(
+                "Quantity must be positive. Received {}".into(), new_order.qty
             ));
         }
 
         if let OrderType::Limit { price } = new_order.order_type
             && price.is_zero()
         {
-            return Err(BookError::ExecutionError("Price must be positive".into()));
+            return Err(BookError::InvalidPrice("Price must be positive. Received {}".into(), price));
         }
 
         let id = self.next_id;
         let next_id = id
             .get()
             .checked_add(1)
-            .ok_or_else(|| BookError::ExecutionError("Order IDs exhausted".into()))?;
+            .ok_or_else(|| BookError::AddOrderError("Order IDs exhausted".into()))?;
         self.next_id = OrderId(next_id);
 
         match new_order.side {
@@ -186,7 +189,7 @@ impl OrderBook {
         let &(side, price) = self
             .orders
             .get(&order_id)
-            .ok_or_else(|| BookError::ExecutionError("Order ID does not exist".into()))?;
+            .ok_or_else(|| BookError::CancelError("Order ID does not exist. Order ID: ".into(), order_id))?;
 
         let book = match side {
             Side::Buy => &mut self.bids,

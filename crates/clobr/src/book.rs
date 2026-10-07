@@ -1,5 +1,6 @@
 //! Order book implementation
 
+use crate::types::OrderType::Limit;
 use crate::types::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroU64;
@@ -58,7 +59,7 @@ impl OrderBook {
             ));
         }
 
-        if let OrderType::Limit { price } = new_order.order_type
+        if let Limit { price } = new_order.order_type
             && price.is_zero()
         {
             return Err(BookError::InvalidPrice(
@@ -224,6 +225,58 @@ impl OrderBook {
 
         self.orders.remove(&order_id);
         Ok(())
+    }
+
+    /// Returns the order ID of the modified order if order volume was decreased.
+    /// Otherwise, returns the order ID of the new order if order volume was increased or price was
+    /// changed. Raising quantity or price will add a new order to the book and may execute.
+    pub fn replace(
+        &mut self,
+        order_id: OrderId,
+        new_qty: Qty,
+        new_price: Price,
+    ) -> Result<OrderId> {
+        if new_qty.is_zero() {
+            return Err(BookError::InvalidQty("New qty cannot be 0".into(), new_qty));
+        }
+
+        if new_price.is_zero() {
+            return Err(BookError::InvalidPrice(
+                "New price cannot be 0".into(),
+                new_price,
+            ));
+        }
+
+        let &(side, price) = self
+            .orders
+            .get(&order_id)
+            .ok_or_else(|| BookError::CancelError("Order ID does not exist".into(), order_id))?;
+
+        let book = match side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        };
+
+        let level = book
+            .get_mut(&price)
+            .expect("Indexed price level does not exist");
+        let index = level
+            .iter()
+            .position(|order| order.id == order_id)
+            .expect("Indexed order does not exist");
+
+        if new_price == level[index].price && new_qty < level[index].qty {
+            level[index].qty = new_qty;
+            Ok(order_id)
+        } else {
+            // in all other cases, it is a new order
+            level.remove(index);
+            if level.is_empty() {
+                book.remove(&price);
+            };
+            self.orders.remove(&order_id);
+            self.add(NewOrder::new(new_qty, side, Limit { price: new_price }))
+        }
     }
 
     pub fn best_bid(&self) -> Option<Price> {
@@ -670,6 +723,32 @@ mod tests {
             assert!(book.bids.is_empty());
             assert!(book.asks.is_empty());
         }
+    }
+
+    #[test]
+    fn replace_reduces_qty_in_place_and_changes_price_with_new_id() {
+        let mut book = OrderBook::new();
+        let id = book
+            .add(NewOrder::new(Qty(5), Buy, Limit { price: Price(100) }))
+            .unwrap();
+
+        assert_eq!(book.replace(id, Qty(3), Price(100)).unwrap(), id);
+        assert_eq!(
+            book.bids[&Price(100)][0],
+            RestingOrder::new(id, Qty(3), Buy, Price(100))
+        );
+        assert_eq!(book.orders[&id], (Buy, Price(100)));
+
+        let new_id = book.replace(id, Qty(3), Price(101)).unwrap();
+        assert_ne!(new_id, id);
+        assert!(!book.orders.contains_key(&id));
+        assert!(!book.bids.contains_key(&Price(100)));
+        assert_eq!(book.orders.len(), 1);
+        assert_eq!(book.orders[&new_id], (Buy, Price(101)));
+        assert_eq!(
+            book.bids[&Price(101)][0],
+            RestingOrder::new(new_id, Qty(3), Buy, Price(101))
+        );
     }
 
     #[test]

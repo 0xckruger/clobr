@@ -48,3 +48,17 @@ if a market order) remain (in which case it would become a resting limit order) 
 cargo test --workspace
 cargo bench -p clobr
 ```
+
+## Pre-commit checks
+
+Install pre-commit hook using the following:
+
+```sh
+git config --local core.hooksPath .githooks
+```
+
+Before each commit, the hook runs `cargo fmt --all`, then
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets`, and
+`cargo test --workspace`.
+
+Errors will block the changes from being committed, warnings do not.

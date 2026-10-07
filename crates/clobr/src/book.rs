@@ -14,9 +14,18 @@ pub enum BookError {
 }
 impl std::fmt::Display for BookError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "An error occurred when adding an order to the book")
+        match self {
+            Self::InvalidQty(message, qty) => write!(f, "{message}. Received {}", qty.get()),
+            Self::AddOrderError(message) => write!(f, "{message}"),
+            Self::InvalidPrice(message, price) => write!(f, "{message}. Received {}", price.0),
+            Self::CancelError(message, order_id) => {
+                write!(f, "{message}. Order ID: {}", order_id.get())
+            }
+        }
     }
 }
+
+impl std::error::Error for BookError {}
 
 pub struct OrderBook {
     bids: BTreeMap<Price, VecDeque<RestingOrder>>,
@@ -44,7 +53,7 @@ impl OrderBook {
     pub fn add(&mut self, new_order: NewOrder) -> Result<OrderId> {
         if new_order.qty.is_zero() {
             return Err(BookError::InvalidQty(
-                "Quantity must be positive. Received {}".into(),
+                "Quantity must be positive".into(),
                 new_order.qty,
             ));
         }
@@ -53,7 +62,7 @@ impl OrderBook {
             && price.is_zero()
         {
             return Err(BookError::InvalidPrice(
-                "Price must be positive. Received {}".into(),
+                "Price must be positive".into(),
                 price,
             ));
         }
@@ -190,9 +199,10 @@ impl OrderBook {
     }
 
     pub fn cancel(&mut self, order_id: OrderId) -> Result<()> {
-        let &(side, price) = self.orders.get(&order_id).ok_or_else(|| {
-            BookError::CancelError("Order ID does not exist. Order ID: ".into(), order_id)
-        })?;
+        let &(side, price) = self
+            .orders
+            .get(&order_id)
+            .ok_or_else(|| BookError::CancelError("Order ID does not exist".into(), order_id))?;
 
         let book = match side {
             Side::Buy => &mut self.bids,
@@ -283,13 +293,19 @@ mod tests {
         let mut book = OrderBook::new();
         let first_id = book.next_id;
         for side in [Buy, Sell] {
-            assert!(
-                book.add(NewOrder::new(Qty(0), side, OrderType::Market))
-                    .is_err()
+            let qty_error = book
+                .add(NewOrder::new(Qty(0), side, OrderType::Market))
+                .unwrap_err();
+            assert_eq!(
+                qty_error.to_string(),
+                "Quantity must be positive. Received 0"
             );
-            assert!(
-                book.add(NewOrder::new(Qty(1), side, Limit { price: Price(0) }))
-                    .is_err()
+            let price_error = book
+                .add(NewOrder::new(Qty(1), side, Limit { price: Price(0) }))
+                .unwrap_err();
+            assert_eq!(
+                price_error.to_string(),
+                "Price must be positive. Received 0"
             );
         }
         assert_eq!(book.next_id, first_id);
@@ -305,7 +321,10 @@ mod tests {
         book.next_id = OrderId(NonZeroU64::MAX);
 
         for order_type in [OrderType::Market, Limit { price: Price(100) }] {
-            assert!(book.add(NewOrder::new(Qty(3), Buy, order_type)).is_err());
+            let error = book
+                .add(NewOrder::new(Qty(3), Buy, order_type))
+                .unwrap_err();
+            assert_eq!(error.to_string(), "Order IDs exhausted");
         }
         assert_eq!(book.asks[&Price(100)][0], maker);
         assert_eq!(book.orders.len(), 1);
@@ -665,13 +684,21 @@ mod tests {
             let asks_before = book.asks.clone();
             let orders_before = book.orders.clone();
 
-            assert!(book.cancel(unknown).is_err());
+            let error = book.cancel(unknown).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("Order ID does not exist. Order ID: {}", unknown.get())
+            );
             assert_eq!(book.bids, bids_before);
             assert_eq!(book.asks, asks_before);
             assert_eq!(book.orders, orders_before);
 
             book.cancel(id).unwrap();
-            assert!(book.cancel(id).is_err());
+            let error = book.cancel(id).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("Order ID does not exist. Order ID: {}", id.get())
+            );
             assert!(book.bids.is_empty());
             assert!(book.asks.is_empty());
             assert!(book.orders.is_empty());

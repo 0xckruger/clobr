@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+run() {
+    printf 'pre-commit: running %s\n' "$*"
+    if "$@"; then
+        return 0
+    else
+        status=$?
+        printf 'pre-commit: FAILED: %s (exit %s). Commit blocked.\n' "$*" "$status" >&2
+        exit "$status"
+    fi
+}
+
+run cargo fmt --all
+run cargo fmt --all --check
+run cargo clippy --workspace --all-targets
+run cargo test --workspace
+
+# Formatting changes the working tree, while Git commits the staged contents.
+# Require Rust changes to be staged so the commit includes the checked code.
+if ! git diff --quiet -- '*.rs'; then
+    printf 'pre-commit: Changes remain unstaged. Review and stage them, then retry the commit.\n' >&2
+    exit 1
+fi
+
+printf 'pre-commit: all checks passed.\n'

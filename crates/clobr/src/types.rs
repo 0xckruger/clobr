@@ -82,7 +82,7 @@ impl RestingOrder {
             id,
             qty,
             side,
-            price
+            price,
         }
     }
 }

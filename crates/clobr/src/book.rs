@@ -1,8 +1,8 @@
 //! Order book implementation
 
+use crate::types::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroU64;
-use crate::types::*;
 
 type Result<T> = std::result::Result<T, BookError>;
 #[derive(Debug, Clone)]
@@ -34,7 +34,9 @@ impl OrderBook {
 
     pub fn add(&mut self, new_order: NewOrder) -> Result<OrderId> {
         if new_order.qty.is_zero() {
-            return Err(BookError::ExecutionError("Quantity must be positive".into()));
+            return Err(BookError::ExecutionError(
+                "Quantity must be positive".into(),
+            ));
         }
 
         if let OrderType::Limit { price } = new_order.order_type {
@@ -44,9 +46,10 @@ impl OrderBook {
         }
 
         let id = self.next_id;
-        let next_id = id.get().checked_add(1).ok_or_else(|| {
-            BookError::ExecutionError("Order IDs exhausted".into())
-        })?;
+        let next_id = id
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| BookError::ExecutionError("Order IDs exhausted".into()))?;
         self.next_id = OrderId(next_id);
 
         match new_order.side {
@@ -174,16 +177,19 @@ impl OrderBook {
     }
 
     pub fn cancel(&mut self, order_id: OrderId) -> Result<()> {
-        let &(side, price) = self.orders.get(&order_id).ok_or_else(|| {
-            BookError::ExecutionError("Order ID does not exist".into())
-        })?;
+        let &(side, price) = self
+            .orders
+            .get(&order_id)
+            .ok_or_else(|| BookError::ExecutionError("Order ID does not exist".into()))?;
 
         let book = match side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
         };
 
-        let level = book.get_mut(&price).expect("Indexed price level does not exist");
+        let level = book
+            .get_mut(&price)
+            .expect("Indexed price level does not exist");
         let index = level
             .iter()
             .position(|order| order.id == order_id)
@@ -198,7 +204,6 @@ impl OrderBook {
         Ok(())
     }
 
-
     pub fn best_bid(&mut self) -> Option<Price> {
         self.bids.last_key_value().map(|(price, _)| *price)
     }
@@ -210,19 +215,19 @@ impl OrderBook {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::types::OrderType::Limit;
     use crate::types::Side::*;
-    use super::*;
 
     #[test]
     fn new_orders_increment_order_ids() {
         let mut orderbook = OrderBook::new();
-        let order_1 = NewOrder::new(Qty(1), Buy, Limit { price: Price(100)});
+        let order_1 = NewOrder::new(Qty(1), Buy, Limit { price: Price(100) });
         let first_id = orderbook.next_id;
         let order_1_id = orderbook.add(order_1).unwrap();
         assert_eq!(first_id, order_1_id);
         let second_id = OrderId(first_id.get().checked_add(1).unwrap());
-        let order_2 = NewOrder::new(Qty(2), Buy, Limit { price: Price(100)});
+        let order_2 = NewOrder::new(Qty(2), Buy, Limit { price: Price(100) });
         let order_2_id = orderbook.add(order_2).unwrap();
         assert_eq!(second_id, order_2_id);
         assert_eq!(orderbook.orders.len(), 2);
@@ -241,7 +246,12 @@ mod tests {
         ] {
             let mut book = OrderBook::new();
             if ask_qty > 0 {
-                book.add(NewOrder::new(Qty(ask_qty), Sell, Limit { price: Price(100) })).unwrap();
+                book.add(NewOrder::new(
+                    Qty(ask_qty),
+                    Sell,
+                    Limit { price: Price(100) },
+                ))
+                .unwrap();
             }
 
             let expected_id = book.next_id;
@@ -261,8 +271,14 @@ mod tests {
         let mut book = OrderBook::new();
         let first_id = book.next_id;
         for side in [Buy, Sell] {
-            assert!(book.add(NewOrder::new(Qty(0), side, OrderType::Market)).is_err());
-            assert!(book.add(NewOrder::new(Qty(1), side, Limit { price: Price(0) })).is_err());
+            assert!(
+                book.add(NewOrder::new(Qty(0), side, OrderType::Market))
+                    .is_err()
+            );
+            assert!(
+                book.add(NewOrder::new(Qty(1), side, Limit { price: Price(0) }))
+                    .is_err()
+            );
         }
         assert_eq!(book.next_id, first_id);
     }
@@ -288,11 +304,19 @@ mod tests {
     #[test]
     fn sell_matches_highest_bid_in_fifo_order() {
         let mut book = OrderBook::new();
-        let lower = book.add(NewOrder::new(Qty(4), Buy, Limit { price: Price(100) })).unwrap();
-        let first = book.add(NewOrder::new(Qty(2), Buy, Limit { price: Price(101) })).unwrap();
-        let second = book.add(NewOrder::new(Qty(5), Buy, Limit { price: Price(101) })).unwrap();
+        let lower = book
+            .add(NewOrder::new(Qty(4), Buy, Limit { price: Price(100) }))
+            .unwrap();
+        let first = book
+            .add(NewOrder::new(Qty(2), Buy, Limit { price: Price(101) }))
+            .unwrap();
+        let second = book
+            .add(NewOrder::new(Qty(5), Buy, Limit { price: Price(101) }))
+            .unwrap();
 
-        let sell_id = book.add(NewOrder::new(Qty(6), Sell, Limit { price: Price(100) })).unwrap();
+        let sell_id = book
+            .add(NewOrder::new(Qty(6), Sell, Limit { price: Price(100) }))
+            .unwrap();
 
         let best_level = &book.bids[&Price(101)];
         assert_eq!(best_level.len(), 1);
@@ -309,15 +333,26 @@ mod tests {
     #[test]
     fn sell_limit_sweeps_crossing_bids_and_rests_remainder() {
         let mut book = OrderBook::new();
-        let lower = book.add(NewOrder::new(Qty(7), Buy, Limit { price: Price(99) })).unwrap();
-        let equal = book.add(NewOrder::new(Qty(2), Buy, Limit { price: Price(100) })).unwrap();
-        let higher = book.add(NewOrder::new(Qty(3), Buy, Limit { price: Price(101) })).unwrap();
+        let lower = book
+            .add(NewOrder::new(Qty(7), Buy, Limit { price: Price(99) }))
+            .unwrap();
+        let equal = book
+            .add(NewOrder::new(Qty(2), Buy, Limit { price: Price(100) }))
+            .unwrap();
+        let higher = book
+            .add(NewOrder::new(Qty(3), Buy, Limit { price: Price(101) }))
+            .unwrap();
 
-        let sell_id = book.add(NewOrder::new(Qty(9), Sell, Limit { price: Price(100) })).unwrap();
+        let sell_id = book
+            .add(NewOrder::new(Qty(9), Sell, Limit { price: Price(100) }))
+            .unwrap();
 
         assert_eq!(book.bids.len(), 1);
         assert_eq!(book.bids[&Price(99)][0].qty, Qty(7));
-        assert_eq!(book.asks[&Price(100)][0], RestingOrder::new(sell_id, Qty(4), Sell, Price(100)));
+        assert_eq!(
+            book.asks[&Price(100)][0],
+            RestingOrder::new(sell_id, Qty(4), Sell, Price(100))
+        );
         assert_eq!(book.orders[&sell_id], (Sell, Price(100)));
         assert!(book.orders.contains_key(&lower));
         assert!(!book.orders.contains_key(&equal));
@@ -330,11 +365,18 @@ mod tests {
         for bid_qty in [0, 2, 3, 4] {
             let mut book = OrderBook::new();
             if bid_qty > 0 {
-                book.add(NewOrder::new(Qty(bid_qty), Buy, Limit { price: Price(100) })).unwrap();
+                book.add(NewOrder::new(
+                    Qty(bid_qty),
+                    Buy,
+                    Limit { price: Price(100) },
+                ))
+                .unwrap();
             }
 
             let expected_id = book.next_id;
-            let sell_id = book.add(NewOrder::new(Qty(3), Sell, OrderType::Market)).unwrap();
+            let sell_id = book
+                .add(NewOrder::new(Qty(3), Sell, OrderType::Market))
+                .unwrap();
 
             assert_eq!(sell_id, expected_id);
             assert_eq!(book.next_id.get(), sell_id.get().checked_add(1).unwrap());
@@ -354,12 +396,20 @@ mod tests {
     fn best_bid_highest_bid_price() {
         let mut book = OrderBook::new();
         for price in [100, 102, 101] {
-            book.add(NewOrder::new(Qty(1), Buy, Limit { price: Price(price) })).unwrap();
+            book.add(NewOrder::new(
+                Qty(1),
+                Buy,
+                Limit {
+                    price: Price(price),
+                },
+            ))
+            .unwrap();
         }
         assert_eq!(book.best_bid(), Some(Price(102)));
         assert_eq!(book.best_ask(), None);
 
-        book.add(NewOrder::new(Qty(1), Sell, OrderType::Market)).unwrap();
+        book.add(NewOrder::new(Qty(1), Sell, OrderType::Market))
+            .unwrap();
         assert_eq!(book.best_bid(), Some(Price(101)));
     }
 
@@ -367,12 +417,20 @@ mod tests {
     fn best_ask_lowest_ask_price() {
         let mut book = OrderBook::new();
         for price in [102, 100, 101] {
-            book.add(NewOrder::new(Qty(1), Sell, Limit { price: Price(price) })).unwrap();
+            book.add(NewOrder::new(
+                Qty(1),
+                Sell,
+                Limit {
+                    price: Price(price),
+                },
+            ))
+            .unwrap();
         }
         assert_eq!(book.best_ask(), Some(Price(100)));
         assert_eq!(book.best_bid(), None);
 
-        book.add(NewOrder::new(Qty(1), Buy, OrderType::Market)).unwrap();
+        book.add(NewOrder::new(Qty(1), Buy, OrderType::Market))
+            .unwrap();
         assert_eq!(book.best_ask(), Some(Price(101)));
     }
 
@@ -387,11 +445,39 @@ mod tests {
                 Buy => (100, Sell, 101),
                 Sell => (101, Buy, 100),
             };
-            book.add(NewOrder::new(Qty(1), first_side, Limit { price: Price(first_price) })).unwrap();
-            assert_eq!(book.best_bid(), if first_side == Buy { Some(Price(100)) } else { None });
-            assert_eq!(book.best_ask(), if first_side == Sell { Some(Price(101)) } else { None });
+            book.add(NewOrder::new(
+                Qty(1),
+                first_side,
+                Limit {
+                    price: Price(first_price),
+                },
+            ))
+            .unwrap();
+            assert_eq!(
+                book.best_bid(),
+                if first_side == Buy {
+                    Some(Price(100))
+                } else {
+                    None
+                }
+            );
+            assert_eq!(
+                book.best_ask(),
+                if first_side == Sell {
+                    Some(Price(101))
+                } else {
+                    None
+                }
+            );
 
-            book.add(NewOrder::new(Qty(1), second_side, Limit { price: Price(second_price) })).unwrap();
+            book.add(NewOrder::new(
+                Qty(1),
+                second_side,
+                Limit {
+                    price: Price(second_price),
+                },
+            ))
+            .unwrap();
             assert_eq!(book.best_bid(), Some(Price(100)));
             assert_eq!(book.best_ask(), Some(Price(101)));
         }
@@ -401,15 +487,29 @@ mod tests {
     fn two_orders_at_same_price_keep_fifo_order() {
         for side in [Buy, Sell] {
             let mut book = OrderBook::new();
-            let first = book.add(NewOrder::new(Qty(2), side, Limit { price: Price(100) })).unwrap();
-            let second = book.add(NewOrder::new(Qty(5), side, Limit { price: Price(100) })).unwrap();
-            let opposite = match side { Buy => Sell, Sell => Buy };
+            let first = book
+                .add(NewOrder::new(Qty(2), side, Limit { price: Price(100) }))
+                .unwrap();
+            let second = book
+                .add(NewOrder::new(Qty(5), side, Limit { price: Price(100) }))
+                .unwrap();
+            let opposite = match side {
+                Buy => Sell,
+                Sell => Buy,
+            };
 
-            book.add(NewOrder::new(Qty(3), opposite, OrderType::Market)).unwrap();
+            book.add(NewOrder::new(Qty(3), opposite, OrderType::Market))
+                .unwrap();
 
-            let levels = match side { Buy => &book.bids, Sell => &book.asks };
+            let levels = match side {
+                Buy => &book.bids,
+                Sell => &book.asks,
+            };
             assert_eq!(levels[&Price(100)].len(), 1);
-            assert_eq!(levels[&Price(100)][0], RestingOrder::new(second, Qty(4), side, Price(100)));
+            assert_eq!(
+                levels[&Price(100)][0],
+                RestingOrder::new(second, Qty(4), side, Price(100))
+            );
             assert!(!book.orders.contains_key(&first));
             assert_eq!(book.orders.len(), 1);
             assert_eq!(book.orders[&second], (side, Price(100)));
@@ -420,38 +520,90 @@ mod tests {
     fn cancel_removes_order_from_level_and_level_if_empty() {
         for side in [Buy, Sell] {
             let mut book = OrderBook::new();
-            let first = book.add(NewOrder::new(Qty(2), side, Limit { price: Price(100) })).unwrap();
-            let middle = book.add(NewOrder::new(Qty(3), side, Limit { price: Price(100) })).unwrap();
-            let last = book.add(NewOrder::new(Qty(4), side, Limit { price: Price(100) })).unwrap();
+            let first = book
+                .add(NewOrder::new(Qty(2), side, Limit { price: Price(100) }))
+                .unwrap();
+            let middle = book
+                .add(NewOrder::new(Qty(3), side, Limit { price: Price(100) }))
+                .unwrap();
+            let last = book
+                .add(NewOrder::new(Qty(4), side, Limit { price: Price(100) }))
+                .unwrap();
             let (other_price, opposite, opposite_price) = match side {
                 Buy => (99, Sell, 101),
                 Sell => (101, Buy, 99),
             };
-            let other = book.add(NewOrder::new(Qty(5), side, Limit { price: Price(other_price) })).unwrap();
-            let opposing = book.add(NewOrder::new(Qty(6), opposite, Limit { price: Price(opposite_price) })).unwrap();
+            let other = book
+                .add(NewOrder::new(
+                    Qty(5),
+                    side,
+                    Limit {
+                        price: Price(other_price),
+                    },
+                ))
+                .unwrap();
+            let opposing = book
+                .add(NewOrder::new(
+                    Qty(6),
+                    opposite,
+                    Limit {
+                        price: Price(opposite_price),
+                    },
+                ))
+                .unwrap();
 
             book.cancel(middle).unwrap();
-            let levels = match side { Buy => &book.bids, Sell => &book.asks };
-            assert_eq!(levels[&Price(100)], VecDeque::from([
-                RestingOrder::new(first, Qty(2), side, Price(100)),
-                RestingOrder::new(last, Qty(4), side, Price(100)),
-            ]));
+            let levels = match side {
+                Buy => &book.bids,
+                Sell => &book.asks,
+            };
+            assert_eq!(
+                levels[&Price(100)],
+                VecDeque::from([
+                    RestingOrder::new(first, Qty(2), side, Price(100)),
+                    RestingOrder::new(last, Qty(4), side, Price(100)),
+                ])
+            );
             assert!(!book.orders.contains_key(&middle));
 
             book.cancel(first).unwrap();
             book.cancel(last).unwrap();
-            let levels = match side { Buy => &book.bids, Sell => &book.asks };
+            let levels = match side {
+                Buy => &book.bids,
+                Sell => &book.asks,
+            };
             assert_eq!(levels.len(), 1);
-            assert_eq!(levels[&Price(other_price)][0], RestingOrder::new(other, Qty(5), side, Price(other_price)));
-            let opposing_levels = match opposite { Buy => &book.bids, Sell => &book.asks };
-            assert_eq!(opposing_levels[&Price(opposite_price)][0], RestingOrder::new(opposing, Qty(6), opposite, Price(opposite_price)));
+            assert_eq!(
+                levels[&Price(other_price)][0],
+                RestingOrder::new(other, Qty(5), side, Price(other_price))
+            );
+            let opposing_levels = match opposite {
+                Buy => &book.bids,
+                Sell => &book.asks,
+            };
+            assert_eq!(
+                opposing_levels[&Price(opposite_price)][0],
+                RestingOrder::new(opposing, Qty(6), opposite, Price(opposite_price))
+            );
             assert_eq!(book.orders.len(), 2);
             assert_eq!(book.orders[&other], (side, Price(other_price)));
             assert_eq!(book.orders[&opposing], (opposite, Price(opposite_price)));
-            assert_eq!(match side { Buy => book.best_bid(), Sell => book.best_ask() }, Some(Price(other_price)));
+            assert_eq!(
+                match side {
+                    Buy => book.best_bid(),
+                    Sell => book.best_ask(),
+                },
+                Some(Price(other_price))
+            );
 
             book.cancel(other).unwrap();
-            assert_eq!(match side { Buy => book.best_bid(), Sell => book.best_ask() }, None);
+            assert_eq!(
+                match side {
+                    Buy => book.best_bid(),
+                    Sell => book.best_ask(),
+                },
+                None
+            );
             book.cancel(opposing).unwrap();
             assert!(book.orders.is_empty());
             assert!(book.bids.is_empty());
@@ -463,7 +615,9 @@ mod tests {
     fn cancel_unknown_id_or_twice_errors() {
         for side in [Buy, Sell] {
             let mut book = OrderBook::new();
-            let id = book.add(NewOrder::new(Qty(2), side, Limit { price: Price(100) })).unwrap();
+            let id = book
+                .add(NewOrder::new(Qty(2), side, Limit { price: Price(100) }))
+                .unwrap();
             let unknown = book.next_id;
             let bids_before = book.bids.clone();
             let asks_before = book.asks.clone();

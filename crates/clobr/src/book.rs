@@ -22,6 +22,12 @@ pub struct OrderBook {
     next_id: OrderId,
 }
 
+impl Default for OrderBook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrderBook {
     pub fn new() -> Self {
         OrderBook {
@@ -39,10 +45,10 @@ impl OrderBook {
             ));
         }
 
-        if let OrderType::Limit { price } = new_order.order_type {
-            if price.is_zero() {
-                return Err(BookError::ExecutionError("Price must be positive".into()));
-            }
+        if let OrderType::Limit { price } = new_order.order_type
+            && price.is_zero()
+        {
+            return Err(BookError::ExecutionError("Price must be positive".into()));
         }
 
         let id = self.next_id;

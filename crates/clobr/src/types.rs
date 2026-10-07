@@ -1,10 +1,41 @@
 //! Types for the order book
 
-pub type Price = u64;
+use std::num::NonZeroU64;
 
-pub type Qty = u32;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Price(pub u64);
 
-pub type OrderId = u64;
+impl Price {
+    pub(crate) fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Qty(pub u64);
+
+impl Qty {
+    pub(crate) fn is_zero(&self) -> bool {
+        self.0 == 0
+    }
+
+    pub(crate) fn get(&self) -> u64 {
+        self.0
+    }
+
+    pub(crate) fn subtract(&mut self, x: u64) {
+        self.0 -= x
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OrderId(pub NonZeroU64);
+
+impl OrderId {
+    pub(crate) fn get(&self) -> NonZeroU64 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -26,6 +57,16 @@ pub struct NewOrder {
     pub order_type: OrderType,
 }
 
+impl NewOrder {
+    pub fn new(qty: Qty, side: Side, order_type: OrderType) -> NewOrder {
+        NewOrder {
+            qty,
+            side,
+            order_type,
+        }
+    }
+}
+
 // Enriched form of NewOrder, submitted to order book
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestingOrder {
@@ -33,4 +74,15 @@ pub struct RestingOrder {
     pub qty: Qty,
     pub side: Side,
     pub price: Price,
+}
+
+impl RestingOrder {
+    pub fn new(id: OrderId, qty: Qty, side: Side, price: Price) -> RestingOrder {
+        RestingOrder {
+            id,
+            qty,
+            side,
+            price
+        }
+    }
 }

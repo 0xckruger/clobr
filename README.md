@@ -23,6 +23,25 @@ Out of scope for this project will be:
 
 Current goal is to build core matching engine before adding gateway with REST/HTTP/WS at a later phase.
 
+## Book structure
+Book will be represented by 2x `BTreeMap<Price, Level>`. One for bids and one for asks.
+A BTreeMap naturally lends itself to maintaining an O(log N) access time per price level.
+By constructing a `BTreeMap<Price, Level>` we can walk the (bid|ask) tree if we have a (sell|buy) order, beginning at
+the most competitive price and conuming volume at each level until either no volume at the requested price (or any price,
+if a market order) remain (in which case it would become a resting limit order) or the order is fulfilled.
+
+
+```      
+                     root
+        [100          |           105]
+          /                         \
+         /                           \
+    [ 95 | 98 ]                  [102 | 108]
+    /     |    \                 /    |     \
+  [90]   [95]  [98]          [102]   [105]  [110]
+ Level   Level  Level        Level   Level   Level
+```
+
 ## Build
 
 ```sh

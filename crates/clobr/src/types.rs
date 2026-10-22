@@ -1,5 +1,6 @@
 //! Types for the order book
 
+use std::fmt::{Display, Formatter};
 use std::num::NonZeroU64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -30,6 +31,12 @@ impl Qty {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct OrderId(pub NonZeroU64);
+
+impl Display for OrderId {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.get())
+    }
+}
 
 impl OrderId {
     pub(crate) fn get(&self) -> NonZeroU64 {

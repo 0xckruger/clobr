@@ -12,6 +12,7 @@ pub enum BookError {
     AddOrderError(String),
     InvalidPrice(String, Price),
     CancelError(String, OrderId),
+    ReplaceError(String, OrderId),
 }
 impl std::fmt::Display for BookError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -21,6 +22,9 @@ impl std::fmt::Display for BookError {
             Self::InvalidPrice(message, price) => write!(f, "{message}. Received {}", price.0),
             Self::CancelError(message, order_id) => {
                 write!(f, "{message}. Order ID: {}", order_id.get())
+            }
+            Self::ReplaceError(message, order_id) => {
+                write!(f, "{message}. Order ID: {order_id}")
             }
         }
     }
@@ -238,8 +242,7 @@ impl OrderBook {
     }
 
     /// Returns the order ID of the modified order if order volume was decreased or unchanged.
-    /// Otherwise, returns the order ID of the new order if order volume was increased or price was
-    /// changed. Raising quantity or price will add a new order to the book and may execute, in
+    /// Raising quantity or price will add a new order to the book and may execute, in
     /// which case the resulting fills are returned alongside the new order ID.
     pub fn replace(
         &mut self,
@@ -261,7 +264,7 @@ impl OrderBook {
         let &(side, price) = self
             .orders
             .get(&order_id)
-            .ok_or_else(|| BookError::CancelError("Order ID does not exist".into(), order_id))?;
+            .ok_or_else(|| BookError::ReplaceError("Order ID does not exist".into(), order_id))?;
 
         let book = match side {
             Side::Buy => &mut self.bids,

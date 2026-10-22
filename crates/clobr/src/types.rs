@@ -34,7 +34,7 @@ pub struct OrderId(pub NonZeroU64);
 
 impl Display for OrderId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.get())
+        self.0.fmt(f)
     }
 }
 

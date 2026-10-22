@@ -6,26 +6,22 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroU64;
 
 type Result<T> = std::result::Result<T, BookError>;
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BookError {
-    InvalidQty(String, Qty),
-    AddOrderError(String),
-    InvalidPrice(String, Price),
-    CancelError(String, OrderId),
-    ReplaceError(String, OrderId),
+    InvalidQty(Qty),
+    InvalidPrice(Price),
+    UnknownOrder(OrderId),
+    OrderIdsExhausted,
 }
 impl std::fmt::Display for BookError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::InvalidQty(message, qty) => write!(f, "{message}. Received {}", qty.get()),
-            Self::AddOrderError(message) => write!(f, "{message}"),
-            Self::InvalidPrice(message, price) => write!(f, "{message}. Received {}", price.0),
-            Self::CancelError(message, order_id) => {
-                write!(f, "{message}. Order ID: {}", order_id.get())
+            Self::InvalidQty(qty) => write!(f, "Quantity must be positive. Received {}", qty.get()),
+            Self::InvalidPrice(price) => write!(f, "Price must be positive. Received {}", price.0),
+            Self::UnknownOrder(order_id) => {
+                write!(f, "Order ID does not exist. Order ID: {order_id}")
             }
-            Self::ReplaceError(message, order_id) => {
-                write!(f, "{message}. Order ID: {order_id}")
-            }
+            Self::OrderIdsExhausted => write!(f, "Order IDs exhausted"),
         }
     }
 }
@@ -56,8 +52,7 @@ impl OrderBook {
     }
 
     fn next_order_id(next_order_id: &mut Option<OrderId>) -> Result<OrderId> {
-        let id =
-            next_order_id.ok_or_else(|| BookError::AddOrderError("Order IDs exhausted".into()))?;
+        let id = next_order_id.ok_or(BookError::OrderIdsExhausted)?;
         *next_order_id = id.get().checked_add(1).map(OrderId);
         Ok(id)
     }
@@ -66,19 +61,13 @@ impl OrderBook {
     /// resting orders, in execution order.
     pub fn add(&mut self, new_order: NewOrder) -> Result<(OrderId, Vec<Fill>)> {
         if new_order.qty.is_zero() {
-            return Err(BookError::InvalidQty(
-                "Quantity must be positive".into(),
-                new_order.qty,
-            ));
+            return Err(BookError::InvalidQty(new_order.qty));
         }
 
         if let Limit { price } = new_order.order_type
             && price.is_zero()
         {
-            return Err(BookError::InvalidPrice(
-                "Price must be positive".into(),
-                price,
-            ));
+            return Err(BookError::InvalidPrice(price));
         }
 
         let id = Self::next_order_id(&mut self.next_order_id)?;
@@ -217,7 +206,7 @@ impl OrderBook {
         let &(side, price) = self
             .orders
             .get(&order_id)
-            .ok_or_else(|| BookError::CancelError("Order ID does not exist".into(), order_id))?;
+            .ok_or(BookError::UnknownOrder(order_id))?;
 
         let book = match side {
             Side::Buy => &mut self.bids,
@@ -241,9 +230,10 @@ impl OrderBook {
         Ok(())
     }
 
-    /// Returns the order ID of the modified order if order volume was decreased or unchanged.
-    /// Raising quantity or price will add a new order to the book and may execute, in
+    /// Raising quantity or changing price will add a new order to the book and may execute, in
     /// which case the resulting fills are returned alongside the new order ID.
+    /// If reducing quantity or leaving quantity and price unchanged, the order is modified in-place
+    /// and the original order ID is returned.
     pub fn replace(
         &mut self,
         order_id: OrderId,
@@ -251,20 +241,17 @@ impl OrderBook {
         new_price: Price,
     ) -> Result<(OrderId, Vec<Fill>)> {
         if new_qty.is_zero() {
-            return Err(BookError::InvalidQty("New qty cannot be 0".into(), new_qty));
+            return Err(BookError::InvalidQty(new_qty));
         }
 
         if new_price.is_zero() {
-            return Err(BookError::InvalidPrice(
-                "New price cannot be 0".into(),
-                new_price,
-            ));
+            return Err(BookError::InvalidPrice(new_price));
         }
 
         let &(side, price) = self
             .orders
             .get(&order_id)
-            .ok_or_else(|| BookError::ReplaceError("Order ID does not exist".into(), order_id))?;
+            .ok_or(BookError::UnknownOrder(order_id))?;
 
         let book = match side {
             Side::Buy => &mut self.bids,
@@ -373,17 +360,11 @@ mod tests {
             let qty_error = book
                 .add(NewOrder::new(Qty(0), side, OrderType::Market))
                 .unwrap_err();
-            assert_eq!(
-                qty_error.to_string(),
-                "Quantity must be positive. Received 0"
-            );
+            assert_eq!(qty_error, BookError::InvalidQty(Qty(0)));
             let price_error = book
                 .add(NewOrder::new(Qty(1), side, Limit { price: Price(0) }))
                 .unwrap_err();
-            assert_eq!(
-                price_error.to_string(),
-                "Price must be positive. Received 0"
-            );
+            assert_eq!(price_error, BookError::InvalidPrice(Price(0)));
         }
         assert_eq!(book.next_order_id, Some(first_id));
     }
@@ -401,7 +382,7 @@ mod tests {
             let error = book
                 .add(NewOrder::new(Qty(3), Buy, order_type))
                 .unwrap_err();
-            assert_eq!(error.to_string(), "Order IDs exhausted");
+            assert_eq!(error, BookError::OrderIdsExhausted);
         }
         assert_eq!(book.asks[&Price(100)][0], maker);
         assert_eq!(book.orders.len(), 1);
@@ -423,7 +404,7 @@ mod tests {
         let error = book
             .add(NewOrder::new(Qty(1), Buy, Limit { price: Price(100) }))
             .unwrap_err();
-        assert_eq!(error.to_string(), "Order IDs exhausted");
+        assert_eq!(error, BookError::OrderIdsExhausted);
         assert_eq!(book.orders.len(), 1);
     }
 
@@ -436,7 +417,7 @@ mod tests {
         book.next_order_id = None;
 
         let error = book.replace(id, Qty(5), Price(101)).unwrap_err();
-        assert_eq!(error.to_string(), "Order IDs exhausted");
+        assert_eq!(error, BookError::OrderIdsExhausted);
         assert_eq!(
             book.bids[&Price(100)][0],
             RestingOrder::new(id, Qty(5), Buy, Price(100))
@@ -837,20 +818,14 @@ mod tests {
             let orders_before = book.orders.clone();
 
             let error = book.cancel(unknown).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!("Order ID does not exist. Order ID: {}", unknown.get())
-            );
+            assert_eq!(error, BookError::UnknownOrder(unknown));
             assert_eq!(book.bids, bids_before);
             assert_eq!(book.asks, asks_before);
             assert_eq!(book.orders, orders_before);
 
             book.cancel(id).unwrap();
             let error = book.cancel(id).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                format!("Order ID does not exist. Order ID: {}", id.get())
-            );
+            assert_eq!(error, BookError::UnknownOrder(id));
             assert!(book.bids.is_empty());
             assert!(book.asks.is_empty());
             assert!(book.orders.is_empty());
@@ -945,6 +920,61 @@ mod tests {
         assert_eq!(
             book.bids[&Price(102)][0],
             RestingOrder::new(new_id, Qty(2), Buy, Price(102))
+        );
+    }
+
+    #[test]
+    fn replace_unknown_or_removed_id_errors() {
+        let mut book = OrderBook::new();
+        let (cancelled, _) = book
+            .add(NewOrder::new(Qty(2), Buy, Limit { price: Price(100) }))
+            .unwrap();
+        let (filled, _) = book
+            .add(NewOrder::new(Qty(3), Sell, Limit { price: Price(105) }))
+            .unwrap();
+        let (resting, _) = book
+            .add(NewOrder::new(Qty(4), Buy, Limit { price: Price(99) }))
+            .unwrap();
+        book.cancel(cancelled).unwrap();
+        book.add(NewOrder::new(Qty(3), Buy, OrderType::Market))
+            .unwrap();
+
+        let unknown = book.next_order_id.unwrap();
+        let bids_before = book.bids.clone();
+        let asks_before = book.asks.clone();
+        let orders_before = book.orders.clone();
+
+        for id in [unknown, cancelled, filled] {
+            assert_eq!(
+                book.replace(id, Qty(1), Price(100)),
+                Err(BookError::UnknownOrder(id))
+            );
+        }
+        assert_eq!(book.bids, bids_before);
+        assert_eq!(book.asks, asks_before);
+        assert_eq!(book.orders, orders_before);
+        assert_eq!(book.orders[&resting], (Buy, Price(99)));
+        assert_eq!(book.next_order_id, Some(unknown));
+    }
+
+    #[test]
+    fn book_errors_display_messages() {
+        let id = OrderId(NonZeroU64::new(7).unwrap());
+        assert_eq!(
+            BookError::InvalidQty(Qty(0)).to_string(),
+            "Quantity must be positive. Received 0"
+        );
+        assert_eq!(
+            BookError::InvalidPrice(Price(0)).to_string(),
+            "Price must be positive. Received 0"
+        );
+        assert_eq!(
+            BookError::UnknownOrder(id).to_string(),
+            "Order ID does not exist. Order ID: 7"
+        );
+        assert_eq!(
+            BookError::OrderIdsExhausted.to_string(),
+            "Order IDs exhausted"
         );
     }
 }

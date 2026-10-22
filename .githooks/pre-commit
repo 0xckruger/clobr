@@ -16,7 +16,7 @@ run() {
 
 run cargo fmt --all
 run cargo fmt --all --check
-run cargo clippy --workspace --all-targets
+run cargo clippy --workspace --all-targets -- -D warnings
 run cargo test --workspace
 
 # Formatting changes the working tree, while Git commits the staged contents.

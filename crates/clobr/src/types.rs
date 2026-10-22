@@ -86,3 +86,22 @@ impl RestingOrder {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fill {
+    pub new_order_id: OrderId,
+    pub resting_order_id: OrderId,
+    pub price: Price,
+    pub qty: Qty,
+}
+
+impl Fill {
+    pub fn new(new_order_id: OrderId, resting_order_id: OrderId, price: Price, qty: Qty) -> Fill {
+        Fill {
+            new_order_id,
+            resting_order_id,
+            price,
+            qty,
+        }
+    }
+}

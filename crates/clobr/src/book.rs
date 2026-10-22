@@ -1,6 +1,6 @@
 //! Order book implementation
 
-use crate::types::OrderType::Limit;
+use crate::types::OrderType::*;
 use crate::types::*;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroU64;
@@ -32,7 +32,7 @@ pub struct OrderBook {
     bids: BTreeMap<Price, VecDeque<RestingOrder>>,
     asks: BTreeMap<Price, VecDeque<RestingOrder>>,
     orders: HashMap<OrderId, (Side, Price)>,
-    next_id: OrderId,
+    next_order_id: Option<OrderId>,
 }
 
 impl Default for OrderBook {
@@ -47,11 +47,20 @@ impl OrderBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             orders: HashMap::new(),
-            next_id: OrderId(NonZeroU64::MIN),
+            next_order_id: Some(OrderId(NonZeroU64::MIN)),
         }
     }
 
-    pub fn add(&mut self, new_order: NewOrder) -> Result<OrderId> {
+    fn next_order_id(next_order_id: &mut Option<OrderId>) -> Result<OrderId> {
+        let id =
+            next_order_id.ok_or_else(|| BookError::AddOrderError("Order IDs exhausted".into()))?;
+        *next_order_id = id.get().checked_add(1).map(OrderId);
+        Ok(id)
+    }
+
+    /// Returns the order ID assigned to the new order and any fills it generated against
+    /// resting orders, in execution order.
+    pub fn add(&mut self, new_order: NewOrder) -> Result<(OrderId, Vec<Fill>)> {
         if new_order.qty.is_zero() {
             return Err(BookError::InvalidQty(
                 "Quantity must be positive".into(),
@@ -68,30 +77,26 @@ impl OrderBook {
             ));
         }
 
-        let id = self.next_id;
-        let next_id = id
-            .get()
-            .checked_add(1)
-            .ok_or_else(|| BookError::AddOrderError("Order IDs exhausted".into()))?;
-        self.next_id = OrderId(next_id);
+        let id = Self::next_order_id(&mut self.next_order_id)?;
 
-        match new_order.side {
+        let fills = match new_order.side {
             Side::Buy => self.execute_buy(new_order, id),
             Side::Sell => self.execute_sell(new_order, id),
-        }
+        };
 
-        Ok(id)
+        Ok((id, fills))
     }
 
-    fn execute_buy(&mut self, new_order: NewOrder, id: OrderId) {
+    fn execute_buy(&mut self, new_order: NewOrder, id: OrderId) -> Vec<Fill> {
         debug_assert_eq!(new_order.side, Side::Buy);
 
         let limit_price = match new_order.order_type {
-            OrderType::Market => None,
-            OrderType::Limit { price } => Some(price),
+            Market => None,
+            Limit { price } => Some(price),
         };
 
         let mut remaining = new_order.qty.get();
+        let mut fills = Vec::new();
 
         while remaining > 0 {
             let Some(mut entry) = self.asks.first_entry() else {
@@ -114,6 +119,7 @@ impl OrderBook {
                 let filled = remaining.min(maker.qty.get());
                 remaining -= filled;
                 maker.qty.subtract(filled);
+                fills.push(Fill::new(id, maker.id, ask_price, Qty(filled)));
 
                 if maker.qty.is_zero() {
                     let maker_id = maker.id;
@@ -128,28 +134,30 @@ impl OrderBook {
         }
 
         if remaining == 0 {
-            return;
+            return fills;
         }
 
         let Some(price) = limit_price else {
-            return;
+            return fills;
         };
 
         let order = RestingOrder::new(id, Qty(remaining), Side::Buy, price);
 
         self.bids.entry(price).or_default().push_back(order);
         self.orders.insert(id, (Side::Buy, price));
+        fills
     }
 
-    fn execute_sell(&mut self, new_order: NewOrder, id: OrderId) {
+    fn execute_sell(&mut self, new_order: NewOrder, id: OrderId) -> Vec<Fill> {
         debug_assert_eq!(new_order.side, Side::Sell);
 
         let limit_price = match new_order.order_type {
-            OrderType::Market => None,
-            OrderType::Limit { price } => Some(price),
+            Market => None,
+            Limit { price } => Some(price),
         };
 
         let mut remaining = new_order.qty.get();
+        let mut fills = Vec::new();
 
         while remaining > 0 {
             let Some(mut entry) = self.bids.last_entry() else {
@@ -172,6 +180,7 @@ impl OrderBook {
                 let filled = remaining.min(maker.qty.get());
                 remaining -= filled;
                 maker.qty.subtract(filled);
+                fills.push(Fill::new(id, maker.id, bid_price, Qty(filled)));
 
                 if maker.qty.is_zero() {
                     let maker_id = maker.id;
@@ -186,17 +195,18 @@ impl OrderBook {
         }
 
         if remaining == 0 {
-            return;
+            return fills;
         }
 
         let Some(price) = limit_price else {
-            return;
+            return fills;
         };
 
         let order = RestingOrder::new(id, Qty(remaining), Side::Sell, price);
 
         self.asks.entry(price).or_default().push_back(order);
         self.orders.insert(id, (Side::Sell, price));
+        fills
     }
 
     pub fn cancel(&mut self, order_id: OrderId) -> Result<()> {
@@ -227,15 +237,16 @@ impl OrderBook {
         Ok(())
     }
 
-    /// Returns the order ID of the modified order if order volume was decreased.
+    /// Returns the order ID of the modified order if order volume was decreased or unchanged.
     /// Otherwise, returns the order ID of the new order if order volume was increased or price was
-    /// changed. Raising quantity or price will add a new order to the book and may execute.
+    /// changed. Raising quantity or price will add a new order to the book and may execute, in
+    /// which case the resulting fills are returned alongside the new order ID.
     pub fn replace(
         &mut self,
         order_id: OrderId,
         new_qty: Qty,
         new_price: Price,
-    ) -> Result<OrderId> {
+    ) -> Result<(OrderId, Vec<Fill>)> {
         if new_qty.is_zero() {
             return Err(BookError::InvalidQty("New qty cannot be 0".into(), new_qty));
         }
@@ -264,18 +275,25 @@ impl OrderBook {
             .iter()
             .position(|order| order.id == order_id)
             .expect("Indexed order does not exist");
+        let current_qty = level[index].qty;
 
-        if new_price == level[index].price && new_qty < level[index].qty {
+        if new_price == price && new_qty <= current_qty {
             level[index].qty = new_qty;
-            Ok(order_id)
+            Ok((order_id, Vec::new()))
         } else {
             // in all other cases, it is a new order
+            let new_order_id = Self::next_order_id(&mut self.next_order_id)?;
+            let new_order = NewOrder::new(new_qty, side, Limit { price: new_price });
             level.remove(index);
             if level.is_empty() {
                 book.remove(&price);
             };
             self.orders.remove(&order_id);
-            self.add(NewOrder::new(new_qty, side, Limit { price: new_price }))
+            let fills = match side {
+                Side::Buy => self.execute_buy(new_order, new_order_id),
+                Side::Sell => self.execute_sell(new_order, new_order_id),
+            };
+            Ok((new_order_id, fills))
         }
     }
 
@@ -298,12 +316,12 @@ mod tests {
     fn new_orders_increment_order_ids() {
         let mut orderbook = OrderBook::new();
         let order_1 = NewOrder::new(Qty(1), Buy, Limit { price: Price(100) });
-        let first_id = orderbook.next_id;
-        let order_1_id = orderbook.add(order_1).unwrap();
+        let first_id = orderbook.next_order_id.unwrap();
+        let (order_1_id, _) = orderbook.add(order_1).unwrap();
         assert_eq!(first_id, order_1_id);
         let second_id = OrderId(first_id.get().checked_add(1).unwrap());
         let order_2 = NewOrder::new(Qty(2), Buy, Limit { price: Price(100) });
-        let order_2_id = orderbook.add(order_2).unwrap();
+        let (order_2_id, _) = orderbook.add(order_2).unwrap();
         assert_eq!(second_id, order_2_id);
         assert_eq!(orderbook.orders.len(), 2);
         assert_eq!(orderbook.bids[&Price(100)][0].id, order_1_id);
@@ -313,10 +331,10 @@ mod tests {
     #[test]
     fn non_resting_orders_receive_order_ids() {
         for (order_type, ask_qty) in [
-            (OrderType::Market, 0),
-            (OrderType::Market, 2),
-            (OrderType::Market, 3),
-            (OrderType::Market, 4),
+            (Market, 0),
+            (Market, 2),
+            (Market, 3),
+            (Market, 4),
             (Limit { price: Price(100) }, 3),
         ] {
             let mut book = OrderBook::new();
@@ -329,11 +347,14 @@ mod tests {
                 .unwrap();
             }
 
-            let expected_id = book.next_id;
-            let id = book.add(NewOrder::new(Qty(3), Buy, order_type)).unwrap();
+            let expected_id = book.next_order_id.unwrap();
+            let (id, _) = book.add(NewOrder::new(Qty(3), Buy, order_type)).unwrap();
 
             assert_eq!(id, expected_id);
-            assert_eq!(book.next_id.get(), id.get().checked_add(1).unwrap());
+            assert_eq!(
+                book.next_order_id.unwrap().get(),
+                id.get().checked_add(1).unwrap()
+            );
             assert!(!book.orders.contains_key(&id));
             assert!(book.bids.is_empty());
             let remaining: u64 = book.asks.values().flatten().map(|o| o.qty.get()).sum();
@@ -344,7 +365,7 @@ mod tests {
     #[test]
     fn invalid_orders_do_not_consume_order_ids() {
         let mut book = OrderBook::new();
-        let first_id = book.next_id;
+        let first_id = book.next_order_id.unwrap();
         for side in [Buy, Sell] {
             let qty_error = book
                 .add(NewOrder::new(Qty(0), side, OrderType::Market))
@@ -361,17 +382,17 @@ mod tests {
                 "Price must be positive. Received 0"
             );
         }
-        assert_eq!(book.next_id, first_id);
+        assert_eq!(book.next_order_id, Some(first_id));
     }
 
     #[test]
     fn exhausted_order_ids_reject_before_matching() {
         let mut book = OrderBook::new();
-        let maker_id = book.next_id;
+        let maker_id = book.next_order_id.unwrap();
         let maker = RestingOrder::new(maker_id, Qty(3), Sell, Price(100));
         book.asks.entry(Price(100)).or_default().push_back(maker);
         book.orders.insert(maker_id, (Sell, Price(100)));
-        book.next_id = OrderId(NonZeroU64::MAX);
+        book.next_order_id = None;
 
         for order_type in [OrderType::Market, Limit { price: Price(100) }] {
             let error = book
@@ -382,23 +403,65 @@ mod tests {
         assert_eq!(book.asks[&Price(100)][0], maker);
         assert_eq!(book.orders.len(), 1);
         assert!(book.bids.is_empty());
-        assert_eq!(book.next_id, OrderId(NonZeroU64::MAX));
+        assert_eq!(book.next_order_id, None);
+    }
+
+    #[test]
+    fn max_order_id_is_issued_before_exhaustion() {
+        let mut book = OrderBook::new();
+        book.next_order_id = Some(OrderId(NonZeroU64::MAX));
+
+        let (id, _) = book
+            .add(NewOrder::new(Qty(1), Buy, Limit { price: Price(100) }))
+            .unwrap();
+        assert_eq!(id, OrderId(NonZeroU64::MAX));
+        assert_eq!(book.next_order_id, None);
+
+        let error = book
+            .add(NewOrder::new(Qty(1), Buy, Limit { price: Price(100) }))
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Order IDs exhausted");
+        assert_eq!(book.orders.len(), 1);
+    }
+
+    #[test]
+    fn replace_with_exhausted_ids_leaves_order_untouched() {
+        let mut book = OrderBook::new();
+        let (id, _) = book
+            .add(NewOrder::new(Qty(5), Buy, Limit { price: Price(100) }))
+            .unwrap();
+        book.next_order_id = None;
+
+        let error = book.replace(id, Qty(5), Price(101)).unwrap_err();
+        assert_eq!(error.to_string(), "Order IDs exhausted");
+        assert_eq!(
+            book.bids[&Price(100)][0],
+            RestingOrder::new(id, Qty(5), Buy, Price(100))
+        );
+        assert_eq!(book.orders[&id], (Buy, Price(100)));
+        assert_eq!(book.bids.len(), 1);
+
+        // reducing in place needs no new ID, so it still succeeds
+        assert_eq!(
+            book.replace(id, Qty(3), Price(100)).unwrap(),
+            (id, Vec::new())
+        );
     }
 
     #[test]
     fn sell_matches_highest_bid_in_fifo_order() {
         let mut book = OrderBook::new();
-        let lower = book
+        let (lower, _) = book
             .add(NewOrder::new(Qty(4), Buy, Limit { price: Price(100) }))
             .unwrap();
-        let first = book
+        let (first, _) = book
             .add(NewOrder::new(Qty(2), Buy, Limit { price: Price(101) }))
             .unwrap();
-        let second = book
+        let (second, _) = book
             .add(NewOrder::new(Qty(5), Buy, Limit { price: Price(101) }))
             .unwrap();
 
-        let sell_id = book
+        let (sell_id, _) = book
             .add(NewOrder::new(Qty(6), Sell, Limit { price: Price(100) }))
             .unwrap();
 
@@ -417,17 +480,17 @@ mod tests {
     #[test]
     fn buy_limit_sweeps_crossing_asks_and_rests_remainder() {
         let mut book = OrderBook::new();
-        let lower = book
+        let (lower, _) = book
             .add(NewOrder::new(Qty(5), Sell, Limit { price: Price(99) }))
             .unwrap();
-        let equal = book
+        let (equal, _) = book
             .add(NewOrder::new(Qty(4), Sell, Limit { price: Price(100) }))
             .unwrap();
-        let higher = book
+        let (higher, _) = book
             .add(NewOrder::new(Qty(1), Sell, Limit { price: Price(101) }))
             .unwrap();
 
-        let buy_id = book
+        let (buy_id, _) = book
             .add(NewOrder::new(Qty(10), Buy, Limit { price: Price(100) }))
             .unwrap();
 
@@ -447,17 +510,17 @@ mod tests {
     #[test]
     fn sell_limit_sweeps_crossing_bids_and_rests_remainder() {
         let mut book = OrderBook::new();
-        let lower = book
+        let (lower, _) = book
             .add(NewOrder::new(Qty(7), Buy, Limit { price: Price(99) }))
             .unwrap();
-        let equal = book
+        let (equal, _) = book
             .add(NewOrder::new(Qty(2), Buy, Limit { price: Price(100) }))
             .unwrap();
-        let higher = book
+        let (higher, _) = book
             .add(NewOrder::new(Qty(3), Buy, Limit { price: Price(101) }))
             .unwrap();
 
-        let sell_id = book
+        let (sell_id, _) = book
             .add(NewOrder::new(Qty(9), Sell, Limit { price: Price(100) }))
             .unwrap();
 
@@ -487,13 +550,16 @@ mod tests {
                 .unwrap();
             }
 
-            let expected_id = book.next_id;
-            let sell_id = book
+            let expected_id = book.next_order_id.unwrap();
+            let (sell_id, _) = book
                 .add(NewOrder::new(Qty(3), Sell, OrderType::Market))
                 .unwrap();
 
             assert_eq!(sell_id, expected_id);
-            assert_eq!(book.next_id.get(), sell_id.get().checked_add(1).unwrap());
+            assert_eq!(
+                book.next_order_id.unwrap().get(),
+                sell_id.get().checked_add(1).unwrap()
+            );
             assert!(!book.orders.contains_key(&sell_id));
             assert!(book.asks.is_empty());
             if bid_qty <= 3 {
@@ -601,10 +667,10 @@ mod tests {
     fn two_orders_at_same_price_keep_fifo_order() {
         for side in [Buy, Sell] {
             let mut book = OrderBook::new();
-            let first = book
+            let (first, _) = book
                 .add(NewOrder::new(Qty(2), side, Limit { price: Price(100) }))
                 .unwrap();
-            let second = book
+            let (second, _) = book
                 .add(NewOrder::new(Qty(5), side, Limit { price: Price(100) }))
                 .unwrap();
             let opposite = match side {
@@ -634,20 +700,20 @@ mod tests {
     fn cancel_removes_order_from_level_and_level_if_empty() {
         for side in [Buy, Sell] {
             let mut book = OrderBook::new();
-            let first = book
+            let (first, _) = book
                 .add(NewOrder::new(Qty(2), side, Limit { price: Price(100) }))
                 .unwrap();
-            let middle = book
+            let (middle, _) = book
                 .add(NewOrder::new(Qty(3), side, Limit { price: Price(100) }))
                 .unwrap();
-            let last = book
+            let (last, _) = book
                 .add(NewOrder::new(Qty(4), side, Limit { price: Price(100) }))
                 .unwrap();
             let (other_price, opposite, opposite_price) = match side {
                 Buy => (99, Sell, 101),
                 Sell => (101, Buy, 99),
             };
-            let other = book
+            let (other, _) = book
                 .add(NewOrder::new(
                     Qty(5),
                     side,
@@ -656,7 +722,7 @@ mod tests {
                     },
                 ))
                 .unwrap();
-            let opposing = book
+            let (opposing, _) = book
                 .add(NewOrder::new(
                     Qty(6),
                     opposite,
@@ -728,18 +794,22 @@ mod tests {
     #[test]
     fn replace_reduces_qty_in_place_and_changes_price_with_new_id() {
         let mut book = OrderBook::new();
-        let id = book
+        let (id, _) = book
             .add(NewOrder::new(Qty(5), Buy, Limit { price: Price(100) }))
             .unwrap();
 
-        assert_eq!(book.replace(id, Qty(3), Price(100)).unwrap(), id);
+        assert_eq!(
+            book.replace(id, Qty(3), Price(100)).unwrap(),
+            (id, Vec::new())
+        );
         assert_eq!(
             book.bids[&Price(100)][0],
             RestingOrder::new(id, Qty(3), Buy, Price(100))
         );
         assert_eq!(book.orders[&id], (Buy, Price(100)));
 
-        let new_id = book.replace(id, Qty(3), Price(101)).unwrap();
+        let (new_id, fills) = book.replace(id, Qty(3), Price(101)).unwrap();
+        assert!(fills.is_empty());
         assert_ne!(new_id, id);
         assert!(!book.orders.contains_key(&id));
         assert!(!book.bids.contains_key(&Price(100)));
@@ -755,10 +825,10 @@ mod tests {
     fn cancel_unknown_id_or_twice_errors() {
         for side in [Buy, Sell] {
             let mut book = OrderBook::new();
-            let id = book
+            let (id, _) = book
                 .add(NewOrder::new(Qty(2), side, Limit { price: Price(100) }))
                 .unwrap();
-            let unknown = book.next_id;
+            let unknown = book.next_order_id.unwrap();
             let bids_before = book.bids.clone();
             let asks_before = book.asks.clone();
             let orders_before = book.orders.clone();
@@ -781,7 +851,97 @@ mod tests {
             assert!(book.bids.is_empty());
             assert!(book.asks.is_empty());
             assert!(book.orders.is_empty());
-            assert_eq!(book.next_id, unknown);
+            assert_eq!(book.next_order_id, Some(unknown));
         }
+    }
+
+    #[test]
+    fn buy_sweep_reports_fills_in_price_time_order() {
+        let mut book = OrderBook::new();
+        let (lower, _) = book
+            .add(NewOrder::new(Qty(5), Sell, Limit { price: Price(99) }))
+            .unwrap();
+        let (first, _) = book
+            .add(NewOrder::new(Qty(2), Sell, Limit { price: Price(100) }))
+            .unwrap();
+        let (second, _) = book
+            .add(NewOrder::new(Qty(2), Sell, Limit { price: Price(100) }))
+            .unwrap();
+        book.add(NewOrder::new(Qty(1), Sell, Limit { price: Price(101) }))
+            .unwrap();
+
+        let (buy_id, fills) = book
+            .add(NewOrder::new(Qty(10), Buy, Limit { price: Price(100) }))
+            .unwrap();
+
+        assert_eq!(
+            fills,
+            vec![
+                Fill::new(buy_id, lower, Price(99), Qty(5)),
+                Fill::new(buy_id, first, Price(100), Qty(2)),
+                Fill::new(buy_id, second, Price(100), Qty(2)),
+            ]
+        );
+        assert_eq!(book.bids[&Price(100)][0].qty, Qty(1));
+    }
+
+    #[test]
+    fn sell_market_reports_partial_fill_of_resting_bid() {
+        let mut book = OrderBook::new();
+        let (higher, _) = book
+            .add(NewOrder::new(Qty(3), Buy, Limit { price: Price(101) }))
+            .unwrap();
+        let (lower, _) = book
+            .add(NewOrder::new(Qty(4), Buy, Limit { price: Price(100) }))
+            .unwrap();
+
+        let (sell_id, fills) = book
+            .add(NewOrder::new(Qty(5), Sell, OrderType::Market))
+            .unwrap();
+
+        assert_eq!(
+            fills,
+            vec![
+                Fill::new(sell_id, higher, Price(101), Qty(3)),
+                Fill::new(sell_id, lower, Price(100), Qty(2)),
+            ]
+        );
+        assert_eq!(book.bids[&Price(100)][0].qty, Qty(2));
+    }
+
+    #[test]
+    fn unmatched_orders_report_no_fills() {
+        for side in [Buy, Sell] {
+            let mut book = OrderBook::new();
+            let (_, fills) = book
+                .add(NewOrder::new(Qty(1), side, OrderType::Market))
+                .unwrap();
+            assert!(fills.is_empty());
+
+            let (_, fills) = book
+                .add(NewOrder::new(Qty(1), side, Limit { price: Price(100) }))
+                .unwrap();
+            assert!(fills.is_empty());
+        }
+    }
+
+    #[test]
+    fn replace_crossing_spread_reports_fills() {
+        let mut book = OrderBook::new();
+        let (bid_id, _) = book
+            .add(NewOrder::new(Qty(5), Buy, Limit { price: Price(100) }))
+            .unwrap();
+        let (ask_id, _) = book
+            .add(NewOrder::new(Qty(3), Sell, Limit { price: Price(102) }))
+            .unwrap();
+
+        let (new_id, fills) = book.replace(bid_id, Qty(5), Price(102)).unwrap();
+
+        assert_eq!(fills, vec![Fill::new(new_id, ask_id, Price(102), Qty(3))]);
+        assert!(book.asks.is_empty());
+        assert_eq!(
+            book.bids[&Price(102)][0],
+            RestingOrder::new(new_id, Qty(2), Buy, Price(102))
+        );
     }
 }

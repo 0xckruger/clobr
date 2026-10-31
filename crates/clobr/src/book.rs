@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroU64;
 
 type Result<T> = std::result::Result<T, BookError>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BookError {
     InvalidQty(Qty),
@@ -13,10 +14,11 @@ pub enum BookError {
     UnknownOrder(OrderId),
     OrderIdsExhausted,
 }
+
 impl std::fmt::Display for BookError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::InvalidQty(qty) => write!(f, "Quantity must be positive. Received {}", qty.get()),
+            Self::InvalidQty(qty) => write!(f, "Quantity must be positive. Received {}", qty.0),
             Self::InvalidPrice(price) => write!(f, "Price must be positive. Received {}", price.0),
             Self::UnknownOrder(order_id) => {
                 write!(f, "Order ID does not exist. Order ID: {order_id}")
@@ -126,34 +128,6 @@ impl OrderBook {
         fills
     }
 
-    /// Fills against `level` front to back until `remaining` is used up or the level is empty.
-    /// Fully filled makers are removed from the level and from `orders`. Returns what's left.
-    fn fill_level(
-        level: &mut VecDeque<RestingOrder>,
-        taker_id: OrderId,
-        mut remaining: u64,
-        orders: &mut HashMap<OrderId, (Side, Price)>,
-        fills: &mut Vec<Fill>,
-    ) -> u64 {
-        // fills are priced from each maker, so every order in a level must share its price
-        debug_assert!(level.iter().all(|order| order.price == level[0].price));
-
-        while remaining > 0
-            && let Some(maker) = level.front_mut()
-        {
-            let filled = remaining.min(maker.qty.get());
-            remaining -= filled;
-            maker.qty.subtract(filled);
-            fills.push(Fill::new(taker_id, maker.id, maker.price, Qty(filled)));
-
-            if maker.qty.is_zero() {
-                orders.remove(&maker.id);
-                level.pop_front();
-            }
-        }
-        remaining
-    }
-
     fn execute_sell(&mut self, new_order: NewOrder, id: OrderId) -> Vec<Fill> {
         debug_assert_eq!(new_order.side, Side::Sell);
 
@@ -200,6 +174,34 @@ impl OrderBook {
         fills
     }
 
+    /// Fills against `level` front to back until `remaining` is used up or the level is empty.
+    /// Fully filled makers are removed from the level and from `orders`. Returns what's left.
+    fn fill_level(
+        level: &mut VecDeque<RestingOrder>,
+        taker_id: OrderId,
+        mut remaining: u64,
+        orders: &mut HashMap<OrderId, (Side, Price)>,
+        fills: &mut Vec<Fill>,
+    ) -> u64 {
+        // fills are priced from each maker, so every order in a level must share its price
+        debug_assert!(level.iter().all(|order| order.price == level[0].price));
+
+        while remaining > 0
+            && let Some(maker) = level.front_mut()
+        {
+            let filled = remaining.min(maker.qty.get());
+            remaining -= filled;
+            maker.qty.subtract(filled);
+            fills.push(Fill::new(taker_id, maker.id, maker.price, Qty(filled)));
+
+            if maker.qty.is_zero() {
+                orders.remove(&maker.id);
+                level.pop_front();
+            }
+        }
+        remaining
+    }
+
     pub fn cancel(&mut self, order_id: OrderId) -> Result<()> {
         let &(side, price) = self
             .orders
@@ -222,7 +224,7 @@ impl OrderBook {
         level.remove(index);
         if level.is_empty() {
             book.remove(&price);
-        };
+        }
 
         self.orders.remove(&order_id);
         Ok(())
@@ -263,26 +265,22 @@ impl OrderBook {
             .iter()
             .position(|order| order.id == order_id)
             .expect("Indexed order does not exist");
-        let current_qty = level[index].qty;
 
-        if new_price == price && new_qty <= current_qty {
+        if new_price == price && new_qty <= level[index].qty {
             level[index].qty = new_qty;
-            Ok((order_id, Vec::new()))
-        } else {
-            // in all other cases, it is a new order
-            let new_order_id = Self::next_order_id(&mut self.next_order_id)?;
-            let new_order = NewOrder::new(new_qty, side, Limit { price: new_price });
-            level.remove(index);
-            if level.is_empty() {
-                book.remove(&price);
-            };
-            self.orders.remove(&order_id);
-            let fills = match side {
-                Side::Buy => self.execute_buy(new_order, new_order_id),
-                Side::Sell => self.execute_sell(new_order, new_order_id),
-            };
-            Ok((new_order_id, fills))
+            return Ok((order_id, Vec::new()));
         }
+
+        let new_order_id = Self::next_order_id(&mut self.next_order_id)?;
+        self.cancel(order_id)?;
+
+        let new_order = NewOrder::new(new_qty, side, Limit { price: new_price });
+
+        let fills = match side {
+            Side::Buy => self.execute_buy(new_order, new_order_id),
+            Side::Sell => self.execute_sell(new_order, new_order_id),
+        };
+        Ok((new_order_id, fills))
     }
 
     pub fn best_bid(&self) -> Option<Price> {

@@ -113,18 +113,14 @@ impl OrderBook {
             }
         }
 
-        if remaining == 0 {
-            return fills;
+        if remaining > 0
+            && let Some(price) = limit_price
+        {
+            let order = RestingOrder::new(id, Qty(remaining), Side::Buy, price);
+            self.bids.entry(price).or_default().push_back(order);
+            self.orders.insert(id, (Side::Buy, price));
         }
 
-        let Some(price) = limit_price else {
-            return fills;
-        };
-
-        let order = RestingOrder::new(id, Qty(remaining), Side::Buy, price);
-
-        self.bids.entry(price).or_default().push_back(order);
-        self.orders.insert(id, (Side::Buy, price));
         fills
     }
 
@@ -159,18 +155,14 @@ impl OrderBook {
             }
         }
 
-        if remaining == 0 {
-            return fills;
+        if remaining > 0
+            && let Some(price) = limit_price
+        {
+            let order = RestingOrder::new(id, Qty(remaining), Side::Sell, price);
+            self.asks.entry(price).or_default().push_back(order);
+            self.orders.insert(id, (Side::Sell, price));
         }
 
-        let Some(price) = limit_price else {
-            return fills;
-        };
-
-        let order = RestingOrder::new(id, Qty(remaining), Side::Sell, price);
-
-        self.asks.entry(price).or_default().push_back(order);
-        self.orders.insert(id, (Side::Sell, price));
         fills
     }
 

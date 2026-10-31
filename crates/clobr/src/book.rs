@@ -104,22 +104,7 @@ impl OrderBook {
 
             let level = entry.get_mut();
 
-            while remaining > 0 {
-                let Some(maker) = level.front_mut() else {
-                    break;
-                };
-
-                let filled = remaining.min(maker.qty.get());
-                remaining -= filled;
-                maker.qty.subtract(filled);
-                fills.push(Fill::new(id, maker.id, ask_price, Qty(filled)));
-
-                if maker.qty.is_zero() {
-                    let maker_id = maker.id;
-                    level.pop_front();
-                    self.orders.remove(&maker_id);
-                }
-            }
+            remaining = Self::fill_level(level, id, remaining, &mut self.orders, &mut fills);
 
             if level.is_empty() {
                 entry.remove_entry();
@@ -139,6 +124,34 @@ impl OrderBook {
         self.bids.entry(price).or_default().push_back(order);
         self.orders.insert(id, (Side::Buy, price));
         fills
+    }
+
+    /// Fills against `level` front to back until `remaining` is used up or the level is empty.
+    /// Fully filled makers are removed from the level and from `orders`. Returns what's left.
+    fn fill_level(
+        level: &mut VecDeque<RestingOrder>,
+        taker_id: OrderId,
+        mut remaining: u64,
+        orders: &mut HashMap<OrderId, (Side, Price)>,
+        fills: &mut Vec<Fill>,
+    ) -> u64 {
+        // fills are priced from each maker, so every order in a level must share its price
+        debug_assert!(level.iter().all(|order| order.price == level[0].price));
+
+        while remaining > 0
+            && let Some(maker) = level.front_mut()
+        {
+            let filled = remaining.min(maker.qty.get());
+            remaining -= filled;
+            maker.qty.subtract(filled);
+            fills.push(Fill::new(taker_id, maker.id, maker.price, Qty(filled)));
+
+            if maker.qty.is_zero() {
+                orders.remove(&maker.id);
+                level.pop_front();
+            }
+        }
+        remaining
     }
 
     fn execute_sell(&mut self, new_order: NewOrder, id: OrderId) -> Vec<Fill> {
@@ -165,22 +178,7 @@ impl OrderBook {
 
             let level = entry.get_mut();
 
-            while remaining > 0 {
-                let Some(maker) = level.front_mut() else {
-                    break;
-                };
-
-                let filled = remaining.min(maker.qty.get());
-                remaining -= filled;
-                maker.qty.subtract(filled);
-                fills.push(Fill::new(id, maker.id, bid_price, Qty(filled)));
-
-                if maker.qty.is_zero() {
-                    let maker_id = maker.id;
-                    level.pop_front();
-                    self.orders.remove(&maker_id);
-                }
-            }
+            remaining = Self::fill_level(level, id, remaining, &mut self.orders, &mut fills);
 
             if level.is_empty() {
                 entry.remove_entry();
